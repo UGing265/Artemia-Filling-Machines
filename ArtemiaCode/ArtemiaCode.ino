@@ -27,6 +27,9 @@ unsigned long pumpStartTime = 0;  // For runtime tracking
 const float FLOW_RATE = 0.5;      // ml per second (calibration constant)
 unsigned long lastDisplayUpdate = 0;
 
+// --- POTENTIOMETER ---
+const int speedPot = A1;          // Potentiometer for pump speed control
+
 void setup() {
   // Cấu hình chân cho Stepper
   pinMode(stepPin, OUTPUT);
@@ -45,10 +48,19 @@ void setup() {
   lcd.backlight();
   lcd.setCursor(0, 0);
   lcd.print("LCD OK");
+
+  // Potentiometer
+  pinMode(speedPot, INPUT);
+}
+
+int readPotSpeed() {
+  int potValue = analogRead(speedPot);
+  return map(potValue, 0, 1023, 0, 255);
 }
 
 void loop() {
   // QUAY THUẬN 1 VÒNG
+  currentSpeed = 255; // Motor running at full
   digitalWrite(dirPin, HIGH);
   for(int x = 0; x < stepsPerRev; x++) {
     digitalWrite(stepPin, HIGH);
@@ -59,6 +71,7 @@ void loop() {
   }
 
   delay(1000); // Nghỉ 2 giây
+  currentSpeed = 0; // Motor stopped
 
   // QUAY NGƯỢC 1 VÒNG
   // digitalWrite(dirPin, LOW);
@@ -68,20 +81,25 @@ void loop() {
   //   digitalWrite(stepPin, LOW);
   //   delayMicroseconds(3000);
   // }
-  digitalWrite(pumpDir, HIGH);
-  digitalWrite(pumpPWM, HIGH);
-  currentSpeed = 255;
+
+  // Pump with potentiometer speed control
+  int pumpSpeed = readPotSpeed();
+  currentSpeed = pumpSpeed;
   pumpRunning = true;
   pumpStartTime = millis();
-  analogWrite(pumpPWM, 255);       // Bật bơm với tốc độ ~80% (0-255)
+  digitalWrite(pumpDir, HIGH);
+  digitalWrite(pumpPWM, HIGH);
+  analogWrite(pumpPWM, pumpSpeed);
+  displayUpdate(); // Show speed while pumping
   delay(2000);
   analogWrite(pumpPWM, 0);
   pumpRuntime += millis() - pumpStartTime;
   pumpVolume = pumpRuntime / 1000.0 * FLOW_RATE;
   pumpRunning = false;
   currentSpeed = 0;
+  displayUpdate(); // Final update
 
-  // Update LCD every 500ms
+  // Update LCD every 500ms during idle
   if (millis() - lastDisplayUpdate >= 500) {
     displayUpdate();
     lastDisplayUpdate = millis();
