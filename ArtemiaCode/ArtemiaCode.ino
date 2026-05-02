@@ -30,6 +30,17 @@ unsigned long lastDisplayUpdate = 0;
 // --- POTENTIOMETER ---
 const int speedPot = A1;          // Potentiometer for pump speed control
 
+// --- PHOTOELECTRIC SENSOR PNP + TUBE COUNTER ---
+const int sensorPin = 10;         // Y+ on CNC shield (D10)
+const int resetBtnPin = A0;       // Abort signal (A0)
+int tubeCount = 0;
+unsigned long lastSensorTrigger = 0;
+const int DEBOUNCE_SENSOR = 50;
+const int DEBOUNCE_BUTTON = 100;
+
+// --- AUTO-STOP PUMP ---
+const float TARGET_VOLUME = 5.0;
+
 void setup() {
   // Cấu hình chân cho Stepper
   pinMode(stepPin, OUTPUT);
@@ -51,6 +62,10 @@ void setup() {
 
   // Potentiometer
   pinMode(speedPot, INPUT);
+
+  // Photoelectric sensor + reset button
+  pinMode(sensorPin, INPUT);
+  pinMode(resetBtnPin, INPUT_PULLUP);
 }
 
 int readPotSpeed() {
@@ -59,6 +74,18 @@ int readPotSpeed() {
 }
 
 void loop() {
+  // --- SENSOR DETECTION + RESET BUTTON (continuous) ---
+  if (digitalRead(sensorPin) == HIGH &&
+      millis() - lastSensorTrigger > DEBOUNCE_SENSOR) {
+    tubeCount++;
+    lastSensorTrigger = millis();
+  }
+
+  if (digitalRead(resetBtnPin) == LOW) {
+    tubeCount = 0;
+    delay(DEBOUNCE_BUTTON);
+  }
+
   // QUAY THUẬN 1 VÒNG
   currentSpeed = 255; // Motor running at full
   digitalWrite(dirPin, HIGH);
@@ -92,12 +119,24 @@ void loop() {
   analogWrite(pumpPWM, pumpSpeed);
   displayUpdate(); // Show speed while pumping
   delay(2000);
-  analogWrite(pumpPWM, 0);
-  pumpRuntime += millis() - pumpStartTime;
-  pumpVolume = pumpRuntime / 1000.0 * FLOW_RATE;
-  pumpRunning = false;
-  currentSpeed = 0;
-  displayUpdate(); // Final update
+
+  // Auto-stop check: if volume >= 5ml, stop pump immediately
+  float currentVolume = (millis() - pumpStartTime) / 1000.0 * FLOW_RATE;
+  if (currentVolume >= TARGET_VOLUME) {
+    analogWrite(pumpPWM, 0);  // Stop pump
+    pumpRuntime += millis() - pumpStartTime;
+    pumpVolume = pumpRuntime / 1000.0 * FLOW_RATE;
+    pumpRunning = false;
+    currentSpeed = 0;
+    displayUpdate(); // Final update
+  } else {
+    analogWrite(pumpPWM, 0);
+    pumpRuntime += millis() - pumpStartTime;
+    pumpVolume = pumpRuntime / 1000.0 * FLOW_RATE;
+    pumpRunning = false;
+    currentSpeed = 0;
+    displayUpdate(); // Final update
+  }
 
   // Update LCD every 500ms during idle
   if (millis() - lastDisplayUpdate >= 500) {
@@ -121,4 +160,9 @@ void displayUpdate() {
   lcd.print("PumpVol:");
   lcd.print(pumpVolume);
   lcd.print(" ml ");
+
+  lcd.setCursor(0, 3);
+  lcd.print("Tubes:");
+  lcd.print(tubeCount);
+  lcd.print("    ");
 }
