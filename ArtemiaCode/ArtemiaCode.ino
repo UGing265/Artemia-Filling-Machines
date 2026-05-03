@@ -1,4 +1,4 @@
-// --- ĐỊNH NGHĨA CHÂN CHO TRỤC Z ---
+// --- ĐỊNH NGHĨA CHÂN CHO TRỤC X ---
 const int stepPin = 2;    // Chân phát xung cho trục X
 const int dirPin = 5;     // Chân điều khiển hướng cho trục X
 
@@ -52,6 +52,10 @@ const int speedPot = A1;          // Potentiometer for pump speed control
 // --- PHOTOELECTRIC SENSOR PNP + TUBE COUNTER ---
 const int sensorPin = 10;         // Y+ on CNC shield (D10)
 const int resetBtnPin = A0;       // Abort signal (A0)
+
+// --- LIMIT SWITCH X+ (CNC SHIELD V3) ---
+const int limitSwitch = 9;       // X+ Limit on CNC Shield V3 (D9)
+
 int tubeCount = 0;
 unsigned long lastSensorTrigger = 0;
 const int DEBOUNCE_SENSOR = 50;
@@ -100,6 +104,55 @@ void abortAll() {
   delay(1000);
 }
 
+void homeSeekingSequence() {
+  const int HOMING_ROTATIONS = 2;
+  const int HOMING_STEPS_PER_ROTATION = 400;
+  const unsigned long HOMING_PULSE_US = 3000;
+  const unsigned long HOMING_PAUSE_US = 500;
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("HOMING...");
+
+  digitalWrite(dirPin, HIGH);
+
+  for (int rot = 0; rot < HOMING_ROTATIONS; rot++) {
+    for (int step = 0; step < HOMING_STEPS_PER_ROTATION; step++) {
+      if (digitalRead(limitSwitch) == LOW) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("HOMING DONE!");
+        delay(2000);
+        lcd.clear();
+        int x = 10;
+        while(x > 0){
+          x -= 1;
+          lcd.setCursor(0, 0); 
+          lcd.print("STARTING... IN "+ String(x));
+          delay(1000);
+          lcd.clear();     
+        }
+        
+        return;
+      }
+
+      digitalWrite(stepPin, HIGH);
+      delayMicroseconds(HOMING_PULSE_US);
+      digitalWrite(stepPin, LOW);
+      delayMicroseconds(HOMING_PAUSE_US);
+    }
+  }
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("PLEASE TURN OFF");
+  lcd.setCursor(9, 1);
+  lcd.print("SYSTEM !!!");
+  while (1) {
+    delay(1000);
+  }
+}
+
 void setup() {
   // Cấu hình chân cho Stepper
   pinMode(stepPin, OUTPUT);
@@ -123,17 +176,23 @@ void setup() {
   lcd.backlight();
   lcd.setCursor(0, 0);
   lcd.print("LCD OK");
-  lcd.setCursor(8, 0);
+  lcd.setCursor(0, 1);
   lcd.print("Rate:");
   lcd.print(flowRateCalibrated);
   delay(1500);
 
+
+
   // Potentiometer
   pinMode(speedPot, INPUT);
 
-  // Photoelectric sensor + reset button
+  // Photoelectric sensor + reset button + limit switch
   pinMode(sensorPin, INPUT);
   pinMode(resetBtnPin, INPUT_PULLUP);
+  pinMode(limitSwitch, INPUT_PULLUP);
+
+  // Homing sequence
+  homeSeekingSequence();
 }
 
 int readPotSpeed() {
