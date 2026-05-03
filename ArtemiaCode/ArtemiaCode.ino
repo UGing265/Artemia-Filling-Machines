@@ -43,6 +43,7 @@ float flowRateCalibrated = 0.5;      // Loaded from EEPROM, used for calculation
 // --- PUMP STATE ---
 unsigned long pumpStartTime = 0;
 bool pumpRunning = false;
+int capturedProcessTime = 0;      // Locked time when pumping starts
 
 
 // --- ĐỊNH NGHĨA CHÂN CHO BƠM NHU ĐỘNG (L298N) ---
@@ -64,6 +65,7 @@ const float FLOW_RATE_FALLBACK = 0.5;  // Default if no EEPROM calibration
 
 // --- POTENTIOMETER ---
 const int speedPot = A1;          // Potentiometer for pump speed control
+const int timePot = A2;           // Potentiometer for pump process time (2-20s)
 
 // --- PHOTOELECTRIC SENSOR PNP + TUBE COUNTER ---
 const int sensorPin = 10;         // Y+ on CNC shield (D10)
@@ -219,6 +221,11 @@ int readPotSpeed() {
   return map(potValue, 0, 1023, 0, 255);
 }
 
+int readPotTime() {
+  int potValue = analogRead(timePot);
+  return map(potValue, 0, 1023, 2, 20);  // 2s to 20s
+}
+
 void loop() {
   // --- SENSOR DETECTION ---
   // NOTE: Old sensor count disabled - using state machine for tube detection instead
@@ -303,9 +310,17 @@ void loop() {
       }
 
       case PUMP_WAIT: {
+        // SAFETY: If tube disappears during 3s wait, reset timer
+        // Only start counting when tube is stable
+        if (digitalRead(sensorPin) == LOW) {
+          stateStartTime = millis();  // Reset timer - wait for stable tube
+          break;
+        }
         if (millis() - stateStartTime >= PUMP_WAIT_DELAY) {
           handleState = PUMP_FILL;
           stateStartTime = millis();
+          // Capture time from potentiometer (locked for this cycle)
+          capturedProcessTime = readPotTime();
           // Start pump
           int pumpSpeed = readPotSpeed();
           currentSpeed = pumpSpeed;
@@ -318,30 +333,49 @@ void loop() {
       }
 
       case PUMP_FILL: {
-        // Check auto-stop at 5ml
-        float currentVolume = (millis() - pumpStartTime) / 1000.0 * flowRateCalibrated;
-        if (currentVolume >= TARGET_VOLUME) {
-          // Stop pump - target volume reached
+        // SAFETY: If tube disappears during pumping, stop pump immediately
+        if (digitalRead(sensorPin) == LOW) {
           analogWrite(pumpPWM, 0);
           digitalWrite(pumpDir, LOW);
           pumpRuntime += millis() - pumpStartTime;
           pumpVolume = pumpRuntime / 1000.0 * flowRateCalibrated;
           pumpRunning = false;
           currentSpeed = 0;
-          tubeCount++;
-          handleState = PUMP_DONE;
+          // Do NOT count - tube disappeared mid-process
+          lcd.setCursor(0, 1);
+          lcd.print("TUBE LOST! SKIP ");
+          delay(1500);
+          handleState = ROTATING;
           stateStartTime = millis();
-        } else if (millis() - stateStartTime >= PUMP_TIMEOUT) {
-          // Timeout - stop pump anyway
+          break;
+        }
+        // Check timeout FIRST - capturedProcessTime always runs fully
+        if (millis() - stateStartTime >= (unsigned long)capturedProcessTime * 1000UL) {
+          // Timeout - stop pump
           analogWrite(pumpPWM, 0);
           digitalWrite(pumpDir, LOW);
-          pumpRuntime += PUMP_TIMEOUT;
+          pumpRuntime += (unsigned long)capturedProcessTime * 1000UL;
           pumpVolume = pumpRuntime / 1000.0 * flowRateCalibrated;
           pumpRunning = false;
           currentSpeed = 0;
           tubeCount++;
           handleState = PUMP_DONE;
           stateStartTime = millis();
+        } else {
+          // Check auto-stop at 5ml (only if timeout hasn't expired)
+          float currentVolume = (millis() - pumpStartTime) / 1000.0 * flowRateCalibrated;
+          if (currentVolume >= TARGET_VOLUME) {
+            // Stop pump - target volume reached
+            analogWrite(pumpPWM, 0);
+            digitalWrite(pumpDir, LOW);
+            pumpRuntime += millis() - pumpStartTime;
+            pumpVolume = pumpRuntime / 1000.0 * flowRateCalibrated;
+            pumpRunning = false;
+            currentSpeed = 0;
+            tubeCount++;
+            handleState = PUMP_DONE;
+            stateStartTime = millis();
+          }
         }
         break;
       }
@@ -549,33 +583,28 @@ void displayUpdate() {
   lcd.setCursor(0, 0);
   lcd.print("MAY CHIET ARTERMIA");
 
-  // Line 1: "Speed:XXX"
+  // Line 1: "Speed:XXX" - show configured speed from pot
   lcd.setCursor(0, 1);
   lcd.print("Speed:");
-  lcd.print(currentSpeed);
+  lcd.print(readPotSpeed());
   lcd.print("    ");
 
   // Line 2: "Tubes:X |....|"
   lcd.setCursor(0, 2);
   lcd.print("Tubes:");
   lcd.print(tubeCount);
-  lcd.print(" ");
+  lcd.print("    ");
   if (digitalRead(sensorPin) == HIGH) {
-    lcd.print("|    ");
+    lcd.print("||||||");
   } else {
-    lcd.print("-    ");
+    lcd.print("------");
   }
 
-  // Line 3: "Time:Xs  SEN:HI"
-  int potValue = analogRead(speedPot);
+  // Line 3: "Time:Xs"
+  int potValue = analogRead(timePot);
   int processingTime = map(potValue, 0, 1023, 2, 20);
   lcd.setCursor(0, 3);
   lcd.print("Time:");
   lcd.print(processingTime);
-  lcd.print("s  SEN:");
-  if (digitalRead(sensorPin) == HIGH) {
-    lcd.print("HI ");
-  } else {
-    lcd.print("LO ");
-  }
+  lcd.print("s            ");
 }
