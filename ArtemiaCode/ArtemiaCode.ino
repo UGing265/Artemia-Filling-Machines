@@ -12,6 +12,22 @@ LiquidCrystal_I2C lcd(0x27, 16, 4);
 enum SystemState { IDLE, PUMPING, CALIBRATING, CALIB_INPUT };
 SystemState systemState = IDLE;
 
+// --- HANDLE SEQUENCE STATE ---
+enum HandleState {
+  ROTATING,        // Stepper rotating 1 revolution
+  SENSOR_CHECK,    // After rotation, check sensor
+  PUMP_WAIT,       // Waiting 3s before pump (tube settled)
+  PUMP_FILL,     // Pump running, auto-stop at 5ml (~5s timeout)
+  PUMP_DONE,       // Pump stopped, wait 5s
+  NO_TUBE_WAIT     // No tube detected, wait 10s
+};
+HandleState handleState = ROTATING;
+unsigned long stateStartTime = 0;
+const int PUMP_WAIT_DELAY = 3000;    // 3s before pump
+const int POST_PUMP_DELAY = 5000;    // 5s after pump
+const int NO_TUBE_DELAY = 10000;     // 10s when no tube
+const unsigned long PUMP_TIMEOUT = 5000; // 5s max pump
+
 // --- CALIBRATION CONSTANTS ---
 const int CALIB_DURATION = 5000;     // 5 seconds
 const int CALIB_LONG_PRESS = 3000;   // 3 seconds to enter calib
@@ -97,6 +113,9 @@ void abortAll() {
   // Exit any special mode
   systemState = IDLE;
 
+  // Reset handle state to start of sequence
+  handleState = ROTATING;
+
   // Show abort message
   lcd.clear();
   lcd.setCursor(0, 1);
@@ -107,8 +126,8 @@ void abortAll() {
 void homeSeekingSequence() {
   const int HOMING_ROTATIONS = 2;
   const int HOMING_STEPS_PER_ROTATION = 400;
-  const unsigned long HOMING_PULSE_US = 3000;
-  const unsigned long HOMING_PAUSE_US = 500;
+  const unsigned long HOMING_PULSE_US = 5500;
+  const unsigned long HOMING_PAUSE_US = 1000;
 
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -202,11 +221,12 @@ int readPotSpeed() {
 
 void loop() {
   // --- SENSOR DETECTION ---
-  if (digitalRead(sensorPin) == HIGH &&
-      millis() - lastSensorTrigger > DEBOUNCE_SENSOR) {
-    tubeCount++;
-    lastSensorTrigger = millis();
-  }
+  // NOTE: Old sensor count disabled - using state machine for tube detection instead
+  // if (digitalRead(sensorPin) == HIGH &&
+  //     millis() - lastSensorTrigger > DEBOUNCE_SENSOR) {
+  //   tubeCount++;
+  //   lastSensorTrigger = millis();
+  // }
 
   // --- ABORT/RESET BUTTON ---
   bool currentBtnState = digitalRead(resetBtnPin);
@@ -249,26 +269,102 @@ void loop() {
     return;
   }
 
-  // --- IDLE: Run stepper, then pump ---
+  // --- IDLE: Sensor-driven handle sequence ---
   if (systemState == IDLE) {
-    // Run stepper 1 revolution
-    currentSpeed = 255;
-    digitalWrite(dirPin, HIGH);
-    for(int x = 0; x < stepsPerRev; x++) {
-      digitalWrite(stepPin, HIGH);
-      delayMicroseconds(3000);
-      digitalWrite(stepPin, LOW);
-      delayMicroseconds(100);
-      motorSteps++;
+    switch (handleState) {
+      case ROTATING: {
+        // Run stepper 1 revolution
+        currentSpeed = 255;
+        digitalWrite(dirPin, HIGH);
+        for (int x = 0; x < stepsPerRev; x++) {
+          digitalWrite(stepPin, HIGH);
+          delayMicroseconds(3000);
+          digitalWrite(stepPin, LOW);
+          delayMicroseconds(100);
+          motorSteps++;
+        }
+        currentSpeed = 0;
+        handleState = SENSOR_CHECK;
+        stateStartTime = millis();
+        break;
+      }
+
+      case SENSOR_CHECK: {
+        // Check sensor immediately after rotation
+        if (digitalRead(sensorPin) == HIGH) {
+          // Tube detected - wait 3s then pump
+          handleState = PUMP_WAIT;
+        } else {
+          // No tube - wait 10s
+          handleState = NO_TUBE_WAIT;
+        }
+        stateStartTime = millis();
+        break;
+      }
+
+      case PUMP_WAIT: {
+        if (millis() - stateStartTime >= PUMP_WAIT_DELAY) {
+          handleState = PUMP_FILL;
+          stateStartTime = millis();
+          // Start pump
+          int pumpSpeed = readPotSpeed();
+          currentSpeed = pumpSpeed;
+          pumpRunning = true;
+          pumpStartTime = millis();
+          digitalWrite(pumpDir, HIGH);
+          analogWrite(pumpPWM, pumpSpeed);
+        }
+        break;
+      }
+
+      case PUMP_FILL: {
+        // Check auto-stop at 5ml
+        float currentVolume = (millis() - pumpStartTime) / 1000.0 * flowRateCalibrated;
+        if (currentVolume >= TARGET_VOLUME) {
+          // Stop pump - target volume reached
+          analogWrite(pumpPWM, 0);
+          digitalWrite(pumpDir, LOW);
+          pumpRuntime += millis() - pumpStartTime;
+          pumpVolume = pumpRuntime / 1000.0 * flowRateCalibrated;
+          pumpRunning = false;
+          currentSpeed = 0;
+          tubeCount++;
+          handleState = PUMP_DONE;
+          stateStartTime = millis();
+        } else if (millis() - stateStartTime >= PUMP_TIMEOUT) {
+          // Timeout - stop pump anyway
+          analogWrite(pumpPWM, 0);
+          digitalWrite(pumpDir, LOW);
+          pumpRuntime += PUMP_TIMEOUT;
+          pumpVolume = pumpRuntime / 1000.0 * flowRateCalibrated;
+          pumpRunning = false;
+          currentSpeed = 0;
+          tubeCount++;
+          handleState = PUMP_DONE;
+          stateStartTime = millis();
+        }
+        break;
+      }
+
+      case PUMP_DONE: {
+        if (millis() - stateStartTime >= POST_PUMP_DELAY) {
+          handleState = ROTATING;
+        }
+        break;
+      }
+
+      case NO_TUBE_WAIT: {
+        // Poll sensor during wait - if tube placed, go to pump immediately
+        if (digitalRead(sensorPin) == HIGH) {
+          handleState = PUMP_WAIT;
+          stateStartTime = millis();
+        } else if (millis() - stateStartTime >= NO_TUBE_DELAY) {
+          handleState = ROTATING;
+        }
+        break;
+      }
     }
 
-    delay(1000); // Rest 1 second
-    currentSpeed = 0;
-
-    // Now run pump for 2 seconds (auto-stop at TARGET_VOLUME)
-    runPumpCycle();
-
-    // Update LCD
     displayUpdate();
   }
 }
@@ -449,23 +545,37 @@ void handleStateMachine() {
 }
 
 void displayUpdate() {
+  // Line 0: "MAY CHIET ARTERMIA"
   lcd.setCursor(0, 0);
+  lcd.print("MAY CHIET ARTERMIA");
+
+  // Line 1: "Speed:XXX"
+  lcd.setCursor(0, 1);
   lcd.print("Speed:");
   lcd.print(currentSpeed);
-  lcd.print("    "); // Clear remaining chars
-
-  lcd.setCursor(0, 1);
-  lcd.print("Motor:");
-  lcd.print(motorSteps);
   lcd.print("    ");
 
+  // Line 2: "Tubes:X |....|"
   lcd.setCursor(0, 2);
-  lcd.print("PumpVol:");
-  lcd.print(pumpVolume);
-  lcd.print(" ml ");
-
-  lcd.setCursor(0, 3);
   lcd.print("Tubes:");
   lcd.print(tubeCount);
-  lcd.print("    ");
+  lcd.print(" ");
+  if (digitalRead(sensorPin) == HIGH) {
+    lcd.print("|    ");
+  } else {
+    lcd.print("-    ");
+  }
+
+  // Line 3: "Time:Xs  SEN:HI"
+  int potValue = analogRead(speedPot);
+  int processingTime = map(potValue, 0, 1023, 2, 20);
+  lcd.setCursor(0, 3);
+  lcd.print("Time:");
+  lcd.print(processingTime);
+  lcd.print("s  SEN:");
+  if (digitalRead(sensorPin) == HIGH) {
+    lcd.print("HI ");
+  } else {
+    lcd.print("LO ");
+  }
 }
