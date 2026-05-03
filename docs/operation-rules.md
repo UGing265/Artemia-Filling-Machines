@@ -12,9 +12,6 @@
 | A1 | Speed potentiometer (pump speed 0-255) |
 | A2 | Time potentiometer (pump process time 2-20s) |
 | D11 | Pump PWM (L298N ENA → Z+) |
-| D13 | Pump direction (L298N IN1 → SpnDir) |
-| A0 | Reset/Abort button (INPUT_PULLUP) |
-| A1 | Speed potentiometer |
 
 ### Motor Settings
 - Stepper: 100 steps/revolution (half-step mode, 400 steps/rotation, 2 rotations = homing)
