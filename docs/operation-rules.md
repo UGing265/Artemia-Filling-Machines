@@ -53,8 +53,9 @@ ROTATING → SENSOR_CHECK → [tube?] → PUMP_WAIT (3s) → PUMP_FILL → PUMP_
 
 ### Step 3: PUMP_WAIT (3s confirmation)
 - Wait up to **3 seconds** for tube to settle
-- **Safety: If tube disappears during wait** → skip immediately, return to ROTATING
-- After 3s elapsed → PUMP_FILL
+- **Safety: If tube disappears during wait** → reset timer, keep waiting for stable tube
+- Only after tube stays present for full 3s → PUMP_FILL
+- If tube appears briefly then disappears → timer resets, must be stable for full 3s
 
 ### Step 4: PUMP_FILL
 - Start pump at potentiometer-set speed (0-255 PWM)
@@ -79,8 +80,8 @@ ROTATING → SENSOR_CHECK → [tube?] → PUMP_WAIT (3s) → PUMP_FILL → PUMP_
 
 | Event | Action |
 |-------|--------|
-| Tube disappears during 3s wait | Skip, continue rotation |
-| Tube disappears during pumping | Stop pump, no count, show `TUBE LOST! SKIP` |
+| Tube disappears during 3s wait | Reset timer, keep waiting (must be stable 3s to pump) |
+| Tube disappears during pumping | Stop pump, no count, show `TUBE LOST! SKIP`, return to ROTATING |
 | Abort button short press | Stop everything, reset tubeCount to 0, return to IDLE |
 
 ---
@@ -127,9 +128,9 @@ ROTATING → SENSOR_CHECK → [tube?] → PUMP_WAIT (3s) → PUMP_FILL → PUMP_
 | Line | Content | Description |
 |------|---------|-------------|
 | 0 | `MAY CHIET ARTERMIA` | Machine name |
-| 1 | `Speed:XXX` | Current pump PWM (0-255) |
+| 1 | `Speed:XXX` | Configured pump speed from A1 pot (0-255), not actual running speed |
 | 2 | `Tubes:X ||||||` or `Tubes:X ------` | Tube count + sensor bar (| = tube present, - = empty) |
-| 3 | `Time:Xs` | Processing time from potentiometer (2-20s map) |
+| 3 | `Time:Xs` | Processing time from A2 pot (2-20s map) |
 
 ---
 
@@ -169,9 +170,10 @@ HandleState: ROTATING | SENSOR_CHECK | PUMP_WAIT | PUMP_FILL | PUMP_DONE | NO_TU
 
 ## Edge Cases
 
-- **Potentiometer at 0:** Pump speed = 0, pump never fills, will timeout after 5s
+- **Potentiometer at 0:** Pump speed = 0, pump never fills, will timeout after set time
 - **First boot (no EEPROM):** Uses default flow rate 0.5 ml/s
 - **Calibration input = 0:** Rate shows `---`, short press does not save
 - **Calibration cancelled:** Returns to IDLE without saving
 - **Homing fails:** Machine halts with `PLEASE TURN OFF SYSTEM !!!`
 - **Tube removed mid-fill:** Tube is NOT counted, machine skips to next rotation
+- **Tube removed during 3s wait:** Timer resets, must stay stable for full 3s
