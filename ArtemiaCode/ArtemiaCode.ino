@@ -9,42 +9,28 @@ const int dirPin = 5;     // Chân điều khiển hướng cho trục X
 LiquidCrystal_I2C lcd(0x27, 16, 4);
 
 // --- STATE MACHINE ---
-enum SystemState { IDLE, PUMPING, CALIBRATING, CALIB_INPUT };
+enum SystemState { IDLE, PUMPING };
 SystemState systemState = IDLE;
 
-// --- HANDLE SEQUENCE STATE ---
 enum HandleState {
   ROTATING,        // Stepper rotating 1 revolution
   SENSOR_CHECK,    // After rotation, check sensor
-  PUMP_WAIT,       // Waiting 3s before pump (tube settled)
-  PUMP_FILL,     // Pump running, auto-stop at 5ml (~5s timeout)
-  PUMP_DONE,       // Pump stopped, wait 5s
-  NO_TUBE_WAIT     // No tube detected, wait 10s
+  PUMP_WAIT,       // Waiting 1s before pump (tube settled)
+  PUMP_FILL,       // Pump running, pot time controls duration
+  PUMP_DONE,       // Pump stopped, wait 3s
+  NO_TUBE_WAIT     // No tube detected, wait 5s
 };
 HandleState handleState = ROTATING;
 unsigned long stateStartTime = 0;
-const int PUMP_WAIT_DELAY = 3000;    // 3s before pump
-const int POST_PUMP_DELAY = 5000;    // 5s after pump
-const int NO_TUBE_DELAY = 10000;     // 10s when no tube
+const int PUMP_WAIT_DELAY = 1000;    // 1s before pump
+const int POST_PUMP_DELAY = 3000;    // 5s after pump
+const int NO_TUBE_DELAY = 5000;     // 5s when no tube
 const unsigned long PUMP_TIMEOUT = 5000; // 5s max pump
-
-// --- CALIBRATION CONSTANTS ---
-const int CALIB_DURATION = 5000;     // 5 seconds
-const int CALIB_LONG_PRESS = 3000;   // 3 seconds to enter calib
-const int CALIB_SAVE_ADDR = 0;
-const float EEPROM_DEFAULT_RATE = 0.5;
-const char EEPROM_MAGIC = 'A';
-
-// --- CALIBRATION VARIABLES ---
-unsigned long calibStartTime = 0;
-float calibInputVolume = 0.0;
-float flowRateCalibrated = 0.5;      // Loaded from EEPROM, used for calculations
 
 // --- PUMP STATE ---
 unsigned long pumpStartTime = 0;
 bool pumpRunning = false;
-int capturedProcessTime = 0;      // Locked time when pumping starts
-
+float capturedProcessTime = 0;  // Locked time when pumping starts
 
 // --- ĐỊNH NGHĨA CHÂN CHO BƠM NHU ĐỘNG (L298N) ---
 const int pumpPWM = 11;   // Chân ENA của L298N nối vào Z+ trên Shield (D11)
@@ -58,10 +44,8 @@ const int stepsPerRev = 100; // 800 step con 200 step là 90 độ
 // --- LCD TRACKING VARIABLES ---
 unsigned long motorSteps = 0;     // Total step pulses
 unsigned long pumpRuntime = 0;    // Pump running time in ms
-float pumpVolume = 0.0;          // Estimated volume in ml
 int currentSpeed = 0;             // Current PWM value
 unsigned long lastDisplayUpdate = 0;
-const float FLOW_RATE_FALLBACK = 0.5;  // Default if no EEPROM calibration
 
 // --- POTENTIOMETER ---
 const int speedPot = A1;          // Potentiometer for pump speed control
@@ -79,24 +63,6 @@ unsigned long lastSensorTrigger = 0;
 const int DEBOUNCE_SENSOR = 50;
 const int DEBOUNCE_BUTTON = 100;
 bool lastAbortBtnState = HIGH;   // For edge detection on latch button
-unsigned long calibPressStart = 0;  // For calibration long-press detection
-bool calibBtnWasHigh = true;        // Previous button state for calibration
-
-// --- AUTO-STOP PUMP ---
-const float TARGET_VOLUME = 5.0;
-
-void loadFlowRate() {
-  if (EEPROM.read(CALIB_SAVE_ADDR) == EEPROM_MAGIC) {
-    EEPROM.get(CALIB_SAVE_ADDR + 1, flowRateCalibrated);
-  } else {
-    flowRateCalibrated = EEPROM_DEFAULT_RATE;
-  }
-}
-
-void saveFlowRate() {
-  EEPROM.write(CALIB_SAVE_ADDR, EEPROM_MAGIC);
-  EEPROM.put(CALIB_SAVE_ADDR + 1, flowRateCalibrated);
-}
 
 void abortAll() {
   // Stop pump if running
@@ -105,7 +71,6 @@ void abortAll() {
 
   // Reset pump state
   pumpRuntime = 0;
-  pumpVolume = 0.0;
   pumpRunning = false;
   currentSpeed = 0;
 
@@ -189,17 +154,11 @@ void setup() {
   digitalWrite(pumpDir, LOW);
   analogWrite(pumpPWM, 0);
 
-  // Load calibrated flow rate from EEPROM
-  loadFlowRate();
-
   // LCD Init
   lcd.init();
   lcd.backlight();
   lcd.setCursor(0, 0);
   lcd.print("LCD OK");
-  lcd.setCursor(0, 1);
-  lcd.print("Rate:");
-  lcd.print(flowRateCalibrated);
   delay(1500);
 
 
@@ -221,61 +180,12 @@ int readPotSpeed() {
   return map(potValue, 0, 1023, 0, 255);
 }
 
-int readPotTime() {
+float readPotTime() {
   int potValue = analogRead(timePot);
-  return map(potValue, 0, 1023, 2, 20);  // 2s to 20s
+  return map(potValue, 0, 1023, 20, 200) / 10.0;  // 2.0s to 20.0s (decimal)
 }
 
 void loop() {
-  // --- SENSOR DETECTION ---
-  // NOTE: Old sensor count disabled - using state machine for tube detection instead
-  // if (digitalRead(sensorPin) == HIGH &&
-  //     millis() - lastSensorTrigger > DEBOUNCE_SENSOR) {
-  //   tubeCount++;
-  //   lastSensorTrigger = millis();
-  // }
-
-  // --- ABORT/RESET BUTTON ---
-  bool currentBtnState = digitalRead(resetBtnPin);
-  if (currentBtnState == LOW && lastAbortBtnState == HIGH) {
-    delay(DEBOUNCE_BUTTON);
-    if (digitalRead(resetBtnPin) == LOW) {
-      abortAll();
-      lastAbortBtnState = LOW;
-    }
-  }
-  if (currentBtnState == HIGH && lastAbortBtnState == LOW) {
-    lastAbortBtnState = HIGH;
-  }
-
-  // --- CALIBRATION CHECK (long-press 3s) ---
-  if (systemState == IDLE) {
-    bool curBtn = digitalRead(resetBtnPin);
-
-    // Button just pressed - start tracking
-    if (curBtn == LOW && calibBtnWasHigh) {
-      calibPressStart = millis();
-    }
-
-    // Button just released - check if long enough
-    if (curBtn == HIGH && !calibBtnWasHigh) {
-      if (calibPressStart > 0 && millis() - calibPressStart >= CALIB_LONG_PRESS) {
-        systemState = CALIBRATING;
-        calibStartTime = millis();
-        lcd.clear();
-      }
-      calibPressStart = 0;  // Clear press tracker
-    }
-
-    calibBtnWasHigh = (curBtn == HIGH);
-  }
-
-  // --- HANDLE STATES ---
-  if (systemState == CALIBRATING || systemState == CALIB_INPUT) {
-    handleStateMachine();
-    return;
-  }
-
   // --- IDLE: Sensor-driven handle sequence ---
   if (systemState == IDLE) {
     switch (handleState) {
@@ -310,13 +220,19 @@ void loop() {
       }
 
       case PUMP_WAIT: {
-        // SAFETY: If tube disappears during 3s wait, reset timer
-        // Only start counting when tube is stable
+        // If tube disappears, reset timer (need stable 3s)
+        // But if tube never returns within 6s total, abort
+        unsigned long waitElapsed = millis() - stateStartTime;
+        lcd.setCursor(0, 1);
+        lcd.print("PUMP_WAIT:");
+        lcd.print(waitElapsed / 1000);
+        lcd.print("s     ");
         if (digitalRead(sensorPin) == LOW) {
           stateStartTime = millis();  // Reset timer - wait for stable tube
-          break;
-        }
-        if (millis() - stateStartTime >= PUMP_WAIT_DELAY) {
+        } else if (waitElapsed >= PUMP_WAIT_DELAY) {
+          // Got stable tube for 3s - start pumping
+          lcd.setCursor(0, 1);
+          lcd.print("START PUMP!    ");
           handleState = PUMP_FILL;
           stateStartTime = millis();
           // Capture time from potentiometer (locked for this cycle)
@@ -328,54 +244,44 @@ void loop() {
           pumpStartTime = millis();
           digitalWrite(pumpDir, HIGH);
           analogWrite(pumpPWM, pumpSpeed);
+        } else if (waitElapsed >= 6000) {
+          // Tube not stable within 6s - abort and rotate
+          handleState = ROTATING;
+          stateStartTime = millis();
         }
         break;
       }
 
       case PUMP_FILL: {
         // SAFETY: If tube disappears during pumping, stop pump immediately
+        unsigned long elapsed = millis() - stateStartTime;
         if (digitalRead(sensorPin) == LOW) {
           analogWrite(pumpPWM, 0);
           digitalWrite(pumpDir, LOW);
           pumpRuntime += millis() - pumpStartTime;
-          pumpVolume = pumpRuntime / 1000.0 * flowRateCalibrated;
           pumpRunning = false;
           currentSpeed = 0;
           // Do NOT count - tube disappeared mid-process
+          lcd.clear();
           lcd.setCursor(0, 1);
           lcd.print("TUBE LOST! SKIP ");
           delay(1500);
           handleState = ROTATING;
           stateStartTime = millis();
+          lcd.clear();
           break;
         }
-        // Check timeout FIRST - capturedProcessTime always runs fully
-        if (millis() - stateStartTime >= (unsigned long)capturedProcessTime * 1000UL) {
+        // Check timeout ONLY - pot time controls pump duration
+        if (millis() - stateStartTime >= (unsigned long)(capturedProcessTime * 1000.0)) {
           // Timeout - stop pump
           analogWrite(pumpPWM, 0);
           digitalWrite(pumpDir, LOW);
-          pumpRuntime += (unsigned long)capturedProcessTime * 1000UL;
-          pumpVolume = pumpRuntime / 1000.0 * flowRateCalibrated;
+          pumpRuntime += (unsigned long)(capturedProcessTime * 1000.0);
           pumpRunning = false;
           currentSpeed = 0;
           tubeCount++;
           handleState = PUMP_DONE;
           stateStartTime = millis();
-        } else {
-          // Check auto-stop at 5ml (only if timeout hasn't expired)
-          float currentVolume = (millis() - pumpStartTime) / 1000.0 * flowRateCalibrated;
-          if (currentVolume >= TARGET_VOLUME) {
-            // Stop pump - target volume reached
-            analogWrite(pumpPWM, 0);
-            digitalWrite(pumpDir, LOW);
-            pumpRuntime += millis() - pumpStartTime;
-            pumpVolume = pumpRuntime / 1000.0 * flowRateCalibrated;
-            pumpRunning = false;
-            currentSpeed = 0;
-            tubeCount++;
-            handleState = PUMP_DONE;
-            stateStartTime = millis();
-          }
         }
         break;
       }
@@ -405,15 +311,16 @@ void loop() {
 
 void runPumpCycle() {
   int pumpSpeed = readPotSpeed();
+  float processTime = readPotTime();
   currentSpeed = pumpSpeed;
   pumpRunning = true;
   pumpStartTime = millis();
+  unsigned long pumpDuration = (unsigned long)(processTime * 1000.0);
   digitalWrite(pumpDir, HIGH);
   analogWrite(pumpPWM, pumpSpeed);
   displayUpdate();
 
-  unsigned long pumpLoopStart = millis();
-  while (millis() - pumpLoopStart < 2000 && pumpRunning) {
+  while (millis() - pumpStartTime < pumpDuration && pumpRunning) {
     // Check abort
     bool btnState = digitalRead(resetBtnPin);
     if (btnState == LOW && lastAbortBtnState == HIGH) {
@@ -422,7 +329,6 @@ void runPumpCycle() {
         analogWrite(pumpPWM, 0);
         digitalWrite(pumpDir, LOW);
         pumpRuntime = 0;
-        pumpVolume = 0.0;
         pumpRunning = false;
         currentSpeed = 0;
         systemState = IDLE;
@@ -437,145 +343,16 @@ void runPumpCycle() {
     if (btnState == HIGH && lastAbortBtnState == LOW) {
       lastAbortBtnState = HIGH;
     }
-
-    // Check volume auto-stop
-    float currentVolume = (millis() - pumpStartTime) / 1000.0 * flowRateCalibrated;
-    if (currentVolume >= TARGET_VOLUME) {
-      analogWrite(pumpPWM, 0);
-      digitalWrite(pumpDir, LOW);
-      pumpRuntime += millis() - pumpStartTime;
-      pumpVolume = pumpRuntime / 1000.0 * flowRateCalibrated;
-      pumpRunning = false;
-      currentSpeed = 0;
-      displayUpdate();
-      return;
-    }
-
     delay(50);
   }
 
-  // Normal stop after 2 seconds
+  // Normal stop after pot time
   analogWrite(pumpPWM, 0);
   digitalWrite(pumpDir, LOW);
-  pumpRuntime += 2000;
-  pumpVolume = pumpRuntime / 1000.0 * flowRateCalibrated;
+  pumpRuntime += (unsigned long)(processTime * 1000.0);
   pumpRunning = false;
   currentSpeed = 0;
   displayUpdate();
-}
-
-void handleStateMachine() {
-  // --- CALIBRATING: Pump runs for 5 seconds ---
-  if (systemState == CALIBRATING) {
-    // Display calibration status
-    lcd.setCursor(0, 0);
-    lcd.print("CALIBRATING...    ");
-    lcd.setCursor(0, 1);
-    lcd.print("Time:");
-    lcd.print((millis() - calibStartTime) / 1000);
-    lcd.print("s       ");
-
-    // Run pump at full speed
-    digitalWrite(pumpDir, HIGH);
-    analogWrite(pumpPWM, 255);
-    currentSpeed = 255;
-
-    // Check if 5 seconds elapsed
-    if (millis() - calibStartTime >= CALIB_DURATION) {
-      analogWrite(pumpPWM, 0);
-      digitalWrite(pumpDir, LOW);
-      systemState = CALIB_INPUT;
-      calibInputVolume = 0.0;
-      lcd.clear();
-    }
-
-    // Check abort during calibration (edge-triggered for latch button)
-    bool currentBtnState = digitalRead(resetBtnPin);
-    if (currentBtnState == LOW && lastAbortBtnState == HIGH) {
-      delay(DEBOUNCE_BUTTON);
-      if (digitalRead(resetBtnPin) == LOW) {
-        analogWrite(pumpPWM, 0);
-        digitalWrite(pumpDir, LOW);
-        systemState = IDLE;
-        lcd.clear();
-        lcd.setCursor(0, 1);
-        lcd.print("CALIB CANCELLED");
-        delay(1000);
-        lastAbortBtnState = LOW;  // Will update on release
-        return;
-      }
-    }
-    // Update on button release
-    if (currentBtnState == HIGH && lastAbortBtnState == LOW) {
-      lastAbortBtnState = HIGH;
-    }
-    return;
-  }
-
-  // --- CALIB_INPUT: User turns pot to set measured volume ---
-  if (systemState == CALIB_INPUT) {
-    // Read potentiometer for volume input (0.00 to 5.00 ml)
-    calibInputVolume = map(analogRead(speedPot), 0, 1023, 0, 500) / 100.0;
-
-    float newRate = calibInputVolume / (CALIB_DURATION / 1000.0);
-
-    lcd.setCursor(0, 0);
-    lcd.print("ENTER ML:");
-    lcd.print(calibInputVolume, 1);
-    lcd.print("    ");
-
-    lcd.setCursor(0, 1);
-    lcd.print("RATE:");
-    if (newRate > 0) {
-      lcd.print(newRate, 3);
-    } else {
-      lcd.print("---");
-    }
-    lcd.print(" ml/s     ");
-
-    lcd.setCursor(0, 3);
-    lcd.print("SHORT=SAVE LONG=CNL");
-
-    // Check for button press (edge-triggered for latch button)
-    bool calBtnState = digitalRead(resetBtnPin);
-    if (calBtnState == LOW && lastAbortBtnState == HIGH) {
-      delay(DEBOUNCE_BUTTON);
-      if (digitalRead(resetBtnPin) == LOW) {
-        unsigned long pressStart = millis();
-        while (digitalRead(resetBtnPin) == LOW) {
-          if (millis() - pressStart > CALIB_LONG_PRESS) {
-            // Long press - cancel
-            systemState = IDLE;
-            lcd.clear();
-            lcd.setCursor(0, 1);
-            lcd.print("CALIB CANCELLED");
-            delay(1000);
-            lastAbortBtnState = LOW;  // Will update on release
-            return;
-          }
-        }
-        // Short press - save
-        if (newRate > 0) {
-          flowRateCalibrated = newRate;
-          saveFlowRate();
-        }
-        lcd.clear();
-        lcd.setCursor(0, 1);
-        lcd.print("CALIB SAVED!");
-        delay(1000);
-        systemState = IDLE;
-        lastAbortBtnState = LOW;  // Will update on release
-        return;
-      }
-    }
-    // Update on button release (LOW to HIGH) to enable next edge detect
-    if (calBtnState == HIGH && lastAbortBtnState == LOW) {
-      lastAbortBtnState = HIGH;
-    }
-    return;
-  }
-
-  // PUMPING state is now handled by runPumpCycle() in loop()
 }
 
 void displayUpdate() {
@@ -600,11 +377,10 @@ void displayUpdate() {
     lcd.print("------");
   }
 
-  // Line 3: "Time:Xs"
-  int potValue = analogRead(timePot);
-  int processingTime = map(potValue, 0, 1023, 2, 20);
+  // Line 3: "Time:X.Xs"
+  float potTime = readPotTime();
   lcd.setCursor(0, 3);
   lcd.print("Time:");
-  lcd.print(processingTime);
-  lcd.print("s            ");
+  lcd.print(potTime, 1);  // 1 decimal place
+  lcd.print("s        ");
 }
