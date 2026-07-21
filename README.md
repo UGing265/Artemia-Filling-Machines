@@ -50,7 +50,7 @@ Mọi thay đổi đều được cập nhật thời gian thực trên màn hì
 
 ![Demo Máy Chiết](docs/resource/1.png)
 
-[▶️ Xem Video Demo trên YouTube](https://youtu.be/GX13D0-sERE)
+[![Video Demo](https://img.youtube.com/vi/GX13D0-sERE/maxresdefault.jpg)](https://youtu.be/GX13D0-sERE)
 
 ## Nhóm
 
