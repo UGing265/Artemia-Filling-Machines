@@ -44,7 +44,9 @@ IDLE → [giữ 3s] → CALIBRATING → [5s] → CALIB_INPUT → [lưu] → IDLE
 
 ## Demo
 
-<!-- Video demo sẽ được thêm sau -->
+![Demo Máy Chiết](docs/resource/1.png)
+
+[Xem Video Demo](docs/resource/1.mp4)
 
 ## Nhóm
 

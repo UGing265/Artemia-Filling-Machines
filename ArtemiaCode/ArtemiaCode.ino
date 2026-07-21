@@ -15,15 +15,15 @@ SystemState systemState = IDLE;
 enum HandleState {
   ROTATING,        // Stepper rotating 1 revolution
   SENSOR_CHECK,    // After rotation, check sensor
-  PUMP_WAIT,       // Waiting 1s before pump (tube settled)
+  PUMP_WAIT,       // Waiting 3s before pump (tube settled)
   PUMP_FILL,       // Pump running, pot time controls duration
   PUMP_DONE,       // Pump stopped, wait 3s
   NO_TUBE_WAIT     // No tube detected, wait 5s
 };
 HandleState handleState = ROTATING;
 unsigned long stateStartTime = 0;
-const int PUMP_WAIT_DELAY = 1000;    // 1s before pump
-const int POST_PUMP_DELAY = 3000;    // 5s after pump
+const int PUMP_WAIT_DELAY = 1000;    // 1s before pump (tube settled)
+const int POST_PUMP_DELAY = 3000;    // 3s after pump
 const int NO_TUBE_DELAY = 5000;     // 5s when no tube
 const unsigned long PUMP_TIMEOUT = 5000; // 5s max pump
 
@@ -182,10 +182,23 @@ int readPotSpeed() {
 
 float readPotTime() {
   int potValue = analogRead(timePot);
-  return map(potValue, 0, 1023, 20, 200) / 10.0;  // 2.0s to 20.0s (decimal)
+  return map(potValue, 0, 1023, 7, 200) / 10.0;  // 2.0s to 20.0s (decimal)
 }
 
 void loop() {
+  // --- Check reset button (external pull-up circuit) ---
+  bool btnState = digitalRead(resetBtnPin);
+  if (btnState == LOW && lastAbortBtnState == HIGH) {
+    delay(DEBOUNCE_BUTTON);
+    if (digitalRead(resetBtnPin) == LOW) {
+      abortAll();
+      return;
+    }
+  }
+  if (btnState == HIGH && lastAbortBtnState == LOW) {
+    lastAbortBtnState = HIGH;
+  }
+
   // --- IDLE: Sensor-driven handle sequence ---
   if (systemState == IDLE) {
     switch (handleState) {
@@ -220,17 +233,21 @@ void loop() {
       }
 
       case PUMP_WAIT: {
-        // If tube disappears, reset timer (need stable 3s)
-        // But if tube never returns within 6s total, abort
+        // If tube disappears, wait 1s to confirm (debounce tube drop)
+        // If tube never returns within 9s total, abort
         unsigned long waitElapsed = millis() - stateStartTime;
-        lcd.setCursor(0, 1);
-        lcd.print("PUMP_WAIT:");
-        lcd.print(waitElapsed / 1000);
-        lcd.print("s     ");
+        // lcd.setCursor(0, 1);
+        // lcd.print("PUMP_WAIT:");
+        // lcd.print(waitElapsed / 1000);
+        // lcd.print("s     ");
         if (digitalRead(sensorPin) == LOW) {
-          stateStartTime = millis();  // Reset timer - wait for stable tube
+          // Tube gone - wait 1s before aborting
+          if (waitElapsed >= PUMP_WAIT_DELAY + 1000) {
+            handleState = ROTATING;
+            stateStartTime = millis();
+          }
         } else if (waitElapsed >= PUMP_WAIT_DELAY) {
-          // Got stable tube for 3s - start pumping
+          // Got stable tube for 1s - start pumping
           lcd.setCursor(0, 1);
           lcd.print("START PUMP!    ");
           handleState = PUMP_FILL;
@@ -244,8 +261,8 @@ void loop() {
           pumpStartTime = millis();
           digitalWrite(pumpDir, HIGH);
           analogWrite(pumpPWM, pumpSpeed);
-        } else if (waitElapsed >= 6000) {
-          // Tube not stable within 6s - abort and rotate
+        } else if (waitElapsed >= 9000) {
+          // Tube not stable within 9s - abort and rotate
           handleState = ROTATING;
           stateStartTime = millis();
         }
